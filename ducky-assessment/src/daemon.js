@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import { paths, ensureDir, appendEvent, readSession, writeSession } from './state.js';
-import { snapshotProcesses, snapshotNetwork, snapshotGit } from './trackers.js';
+import { snapshotProcesses, snapshotNetwork, snapshotGit, snapshotAiArtifacts } from './trackers.js';
 import { watchFiles } from './watcher.js';
 
 // Detached background process. Invoked as: node daemon.js <projectDir>
@@ -46,6 +46,7 @@ function shutdown() {
   // Persist git end-state so the report can compute commit/diff deltas.
   const session = readSession(p) || {};
   session.gitEnd = snapshotGit(projectDir);
+  session.aiArtifactsEnd = snapshotAiArtifacts(projectDir);
   session.endedAt = new Date().toISOString();
   writeSession(p, session);
   appendEvent(p, { type: 'stop', ts: Date.now() });

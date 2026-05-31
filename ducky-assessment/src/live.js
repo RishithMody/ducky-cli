@@ -5,6 +5,7 @@ import { renderArt, rgb } from './art.js';
 const BURST_BYTES = 800;
 const POLL_MS = 3000;
 const FEED_MAX = 12;
+const IDLE_GAP_MS = 5 * 60 * 1000; // gap before a burst that suggests an AI consultation pause
 
 // Foreground real-time dashboard. Runs until Ctrl-C. Independent of the
 // `start`/`stop` daemon; it observes the same signals live without writing a report.
@@ -17,6 +18,8 @@ export async function runLive(projectDir) {
     files: new Map(),      // file -> { edits, bytes, bursts }
     bursts: 0,
     edits: 0,
+    lastEditTs: null,
+    idleResumes: 0,        // edits/bursts that followed a long idle gap
     feed: [],              // recent activity lines
   };
 
@@ -29,6 +32,9 @@ export async function runLive(projectDir) {
   push('start', 'live monitor started');
 
   const stopWatch = watchFiles(projectDir, (c) => {
+    const now = c.ts || Date.now();
+    const gap = state.lastEditTs ? now - state.lastEditTs : 0;
+    state.lastEditTs = now;
     state.edits++;
     const f = state.files.get(c.file) || { edits: 0, bytes: 0, bursts: 0 };
     f.edits++;
@@ -38,6 +44,11 @@ export async function runLive(projectDir) {
     state.files.set(c.file, f);
     const d = `${c.delta >= 0 ? '+' : ''}${c.delta}b`;
     push(burst ? 'burst' : 'edit', `${c.file} ${d}${burst ? rgb(217, 101, 112, '  (likely AI paste)') : ''}`);
+    // Long quiet period followed by activity: classic "got stuck, consulted AI, pasted".
+    if (gap >= IDLE_GAP_MS) {
+      state.idleResumes++;
+      push('idle', rgb(217, 101, 112, `resumed after ${Math.round(gap / 60000)}m idle - possible AI consultation pause`));
+    }
   });
 
   async function poll() {
@@ -72,6 +83,7 @@ export async function runLive(projectDir) {
       `  ${pad('AI endpoints')}${val(state.hosts.size)}   ${[...state.hosts.keys()].slice(0, 3).join(', ') || '-'}`,
       `  ${pad('files touched')}${val(state.files.size)}   (${state.edits} edits)`,
       `  ${pad('burst edits')}${val(state.bursts)}   ${rgb(217, 101, 112, state.bursts ? 'AI-shaped inserts' : '')}`,
+      `  ${pad('idle resumes')}${val(state.idleResumes)}   ${rgb(217, 101, 112, state.idleResumes ? 'gap+burst (possible AI pause)' : '')}`,
       `  ${pad('git commits')}${val(commitDelta)}   since start${git ? ` | ${git.branch}@${git.head.slice(0, 7)}` : ''}`,
       '',
       `  ${rgb(120, 120, 120, 'Activity')}`,

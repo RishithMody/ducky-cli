@@ -9,6 +9,7 @@ import {
 } from './state.js';
 import {
   snapshotGit, snapshotProcesses, snapshotNetwork, scanAiConfig, scanEditorExtensions,
+  snapshotAiArtifacts,
 } from './trackers.js';
 import { buildReport } from './report.js';
 import { renderArt } from './art.js';
@@ -37,6 +38,7 @@ program
       startedAt: new Date().toISOString(),
       projectDir: p.projectDir,
       gitStart: git,
+      aiArtifactsStart: snapshotAiArtifacts(p.projectDir),
     });
 
     // Detach the daemon so it outlives this command.
@@ -123,6 +125,41 @@ program
   .description('Real-time dashboard - keep running in a separate terminal to watch activity live')
   .action(async () => {
     await runLive(process.cwd());
+  });
+
+program
+  .command('diff')
+  .description('Show which files changed most during the last session')
+  .option('--ai', 'highlight files with AI-shaped edit patterns (bursts / high burstiness)')
+  .action((opts) => {
+    const p = paths(process.cwd());
+    let report;
+    try { report = JSON.parse(fs.readFileSync(p.report, 'utf8')); } catch {
+      console.log('No ducky-report.json here. Run "ducky start" then "ducky stop" first.');
+      return;
+    }
+    const perFile = report.tracking?.files?.perFile || {};
+    let rows = Object.entries(perFile).map(([file, f]) => ({
+      file,
+      edits: f.edits,
+      bytes: f.bytesAdded,
+      bursts: f.bursts || 0,
+      burstiness: f.velocity?.burstiness ?? null,
+    }));
+    if (opts.ai) rows = rows.filter((r) => r.bursts > 0 || (r.burstiness ?? 0) >= 0.6);
+    rows.sort((a, b) => b.bytes - a.bytes || b.edits - a.edits);
+
+    if (!rows.length) {
+      console.log(opts.ai ? 'No files with AI-shaped edit patterns.' : 'No file changes recorded.');
+      return;
+    }
+    console.log(`\n  ${'file'.padEnd(34)}${'edits'.padStart(6)}${'+bytes'.padStart(9)}${'bursts'.padStart(8)}${'burstiness'.padStart(12)}`);
+    for (const r of rows) {
+      const flag = r.bursts > 0 || (r.burstiness ?? 0) >= 0.6 ? '  <- AI-shaped' : '';
+      const b = r.burstiness == null ? '-' : String(r.burstiness);
+      console.log(`  ${r.file.slice(0, 33).padEnd(34)}${String(r.edits).padStart(6)}${String(r.bytes).padStart(9)}${String(r.bursts).padStart(8)}${b.padStart(12)}${flag}`);
+    }
+    console.log('');
   });
 
 program.parse();

@@ -79,13 +79,22 @@ export function snapshotGit(dir) {
   return { head, branch, commitCount: count, dirtyCount: dirty };
 }
 
-// Commits between two SHAs, flagged if they look AI-assisted.
+// Phrases that AI-generated commit messages tend to overuse.
+const AI_PHRASE = /\b(comprehensive|robust|seamless(ly)?|efficient(ly)?|leverage|enhance(d|ment)?|streamline|best practices|production[- ]ready|gracefully|ensure that|implement(ing|ed)? (a |the )?(robust|comprehensive|proper)|improve(d|ment)? (the )?(overall|code))\b/i;
+// Bot co-author trailers some AI tools inject automatically (ground truth).
+const BOT_TRAILER = /co-authored-by:.*(\[bot\]|copilot|cursor|claude|noreply@github)/i;
+
+// Commits between two SHAs with per-commit AI signals.
 export function gitCommitsBetween(dir, from, to) {
   const range = from && from !== to ? `${from}..${to}` : to;
   const raw = sh('git', ['-C', dir, 'log', range, '--pretty=%H%x1f%s%x1f%b%x1e', '--no-merges']);
   return raw.split('\x1e').map((c) => c.trim()).filter(Boolean).map((c) => {
     const [hash, subject, body = ''] = c.split('\x1f');
-    return { hash, subject, aiAssisted: AI.test(subject) || AI.test(body) || /co-authored-by/i.test(body) };
+    const signals = [];
+    if (BOT_TRAILER.test(body)) signals.push('bot-trailer');
+    if (AI.test(subject) || AI.test(body)) signals.push('tool-mention');
+    if (AI_PHRASE.test(subject) || AI_PHRASE.test(body)) signals.push('ai-phrasing');
+    return { hash: hash.slice(0, 8), subject, signals, aiAssisted: signals.length > 0 };
   });
 }
 
@@ -107,4 +116,51 @@ export function scanEditorExtensions() {
     } catch { /* dir absent */ }
   }
   return [...found];
+}
+
+// AI extensions reported by the VS Code CLI (catches idle tools). Zero overhead.
+export function listCodeExtensions() {
+  for (const bin of ['code', 'code-insiders', 'cursor']) {
+    const out = sh(bin, ['--list-extensions']);
+    if (out) return out.split('\n').map((s) => s.trim()).filter((s) => AI.test(s));
+  }
+  return [];
+}
+
+// Plaintext AI session logs + language-server logs. Existence/size/mtime are
+// exact invocation evidence; growth across a session ties usage to the window.
+export function snapshotAiArtifacts(dir) {
+  const home = os.homedir();
+  const targets = [
+    ['aider-history', path.join(dir, '.aider.chat.history.md')],
+    ['aider-input', path.join(dir, '.aider.input.history')],
+    ['claude-code', path.join(home, '.claude', 'projects')],
+    ['shell-gpt', path.join(home, '.config', 'shell_gpt', 'chat_cache')],
+    ['copilot-logs', path.join(home, '.config', 'GitHub Copilot')],
+    ['copilot-logs-mac', path.join(home, 'Library', 'Application Support', 'GitHub Copilot')],
+  ];
+  const out = [];
+  for (const [label, p] of targets) {
+    try {
+      const st = fs.statSync(p);
+      out.push({ label, path: p, exists: true, size: dirSize(p, st), mtime: st.mtimeMs });
+    } catch { /* absent */ }
+  }
+  return out;
+}
+
+// Total size of a file, or recursive size of a directory (bounded, best-effort).
+function dirSize(p, st) {
+  if (!st.isDirectory()) return st.size;
+  let total = 0;
+  try {
+    for (const e of fs.readdirSync(p, { withFileTypes: true })) {
+      const full = path.join(p, e.name);
+      try {
+        const s = fs.statSync(full);
+        total += s.isDirectory() ? dirSize(full, s) : s.size;
+      } catch { /* skip */ }
+    }
+  } catch { /* skip */ }
+  return total;
 }
