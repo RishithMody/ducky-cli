@@ -1,0 +1,4 @@
+node_modules/
+dist/
+.ducky/
+*.log

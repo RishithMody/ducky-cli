@@ -1,0 +1,15 @@
+{
+  "name": "ducky",
+  "version": "1.0.0",
+  "description": "AI Usage Tracker CLI",
+  "type": "module",
+  "bin": {
+    "ducky": "src/index.js"
+  },
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "commander": "^13.1.0"
+  }
+}
