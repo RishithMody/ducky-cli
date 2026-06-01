@@ -1,12 +1,39 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+// ─── Constants ────────────────────────────────────────────────────────────────
+
 const IGNORE = /(^|\/)(\.git|node_modules|\.ducky|dist|build|\.next|coverage)(\/|$)/;
 const CODE = /\.(js|jsx|ts|tsx|py|go|rs|java|rb|php|c|h|cpp|cs|swift|kt|scala|sh|sql|json|md|yml|yaml|html|css|vue|svelte)$/i;
 
-// Recursively watch the project tree, recording per-file change events with
-// size deltas. A large positive delta in a short window is a strong AI-paste
-// signal; bursts are derived at report time.
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function safeSize(f) {
+  try { return fs.statSync(f).size; } catch { return 0; }
+}
+
+function* walk(dir) {
+  let entries;
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+  for (const e of entries) {
+    const full = path.join(dir, e.name);
+    if (IGNORE.test(full)) continue;
+    if (e.isDirectory()) yield* walk(full);
+    else if (CODE.test(full)) yield full;
+  }
+}
+
+// ─── File Watcher ─────────────────────────────────────────────────────────────
+
+/**
+ * Recursively watch a project directory for changes to code files.
+ * Emits a change event with the byte delta for each save. A large positive
+ * delta is a proxy for an AI paste or accept action.
+ * @param {string} dir - Absolute path to the directory to watch.
+ * @param {(change: { file: string, delta: number, size: number, ts: number }) => void} onChange
+ *   Called for each code file change with the relative file path and byte delta.
+ * @returns {() => void} A stop function that closes the watcher.
+ */
 export function watchFiles(dir, onChange) {
   const sizes = new Map();
   try {
@@ -27,19 +54,4 @@ export function watchFiles(dir, onChange) {
   } catch { /* recursive watch unsupported */ }
 
   return () => { try { watcher?.close(); } catch { /* ignore */ } };
-}
-
-function safeSize(f) {
-  try { return fs.statSync(f).size; } catch { return 0; }
-}
-
-function* walk(dir) {
-  let entries;
-  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
-  for (const e of entries) {
-    const full = path.join(dir, e.name);
-    if (IGNORE.test(full)) continue;
-    if (e.isDirectory()) yield* walk(full);
-    else if (CODE.test(full)) yield full;
-  }
 }

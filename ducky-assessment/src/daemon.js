@@ -4,7 +4,9 @@ import { snapshotProcesses, snapshotNetwork, snapshotGit, snapshotAiArtifacts } 
 import { watchFiles } from './watcher.js';
 
 // Detached background process. Invoked as: node daemon.js <projectDir>
-// Samples process/network/git on an interval and records file edits live.
+
+// ─── Setup ────────────────────────────────────────────────────────────────────
+
 const projectDir = process.argv[2] || process.cwd();
 const p = paths(projectDir);
 ensureDir(p);
@@ -12,11 +14,16 @@ ensureDir(p);
 const SAMPLE_MS = 15000;
 fs.writeFileSync(p.pid, String(process.pid));
 
+// ─── Logging ──────────────────────────────────────────────────────────────────
+
 function log(msg) {
   fs.appendFileSync(p.log, `[${new Date().toISOString()}] ${msg}\n`);
 }
 
+// ─── Sampling ─────────────────────────────────────────────────────────────────
+
 let sampleCount = 0;
+
 async function sample() {
   try {
     const procs = snapshotProcesses();
@@ -29,6 +36,8 @@ async function sample() {
   }
 }
 
+// ─── File Watching ────────────────────────────────────────────────────────────
+
 // Record every code-file change with its size delta for burst analysis.
 const stopWatch = watchFiles(projectDir, (change) => {
   appendEvent(p, { type: 'file', ...change });
@@ -36,9 +45,7 @@ const stopWatch = watchFiles(projectDir, (change) => {
   log(`file: ${change.file} delta=${change.delta >= 0 ? '+' : ''}${change.delta}b${burst}`);
 });
 
-log(`daemon started pid=${process.pid} dir=${projectDir}`);
-sample();
-const timer = setInterval(sample, SAMPLE_MS);
+// ─── Shutdown ─────────────────────────────────────────────────────────────────
 
 function shutdown() {
   clearInterval(timer);
@@ -56,3 +63,9 @@ function shutdown() {
 
 process.on('SIGTERM', shutdown);
 process.on('SIGINT', shutdown);
+
+// ─── Start ────────────────────────────────────────────────────────────────────
+
+log(`daemon started pid=${process.pid} dir=${projectDir}`);
+sample();
+const timer = setInterval(sample, SAMPLE_MS);

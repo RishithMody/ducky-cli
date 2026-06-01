@@ -1,4 +1,24 @@
-node_modules/
-dist/
+# Runtime data
 .ducky/
+ducky-report.json
+
+# Dependencies
+node_modules/
+
+# Logs
 *.log
+npm-debug.log*
+
+# Environment
+.env
+.env.*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo

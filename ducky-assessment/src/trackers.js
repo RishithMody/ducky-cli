@@ -4,6 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+// ─── Constants ────────────────────────────────────────────────────────────────
+
 // Keywords that identify AI coding tools by process/extension/host name.
 const AI = /(copilot|cursor|claude|codeium|windsurf|tabnine|sourcegraph|\bcody\b|continue|aider|chatgpt|openai|anthropic|codewhisperer|amazon-?q|\bkiro\b|ollama|supermaven|pieces|codegpt)/i;
 
@@ -14,6 +16,14 @@ const CONFIG_MARKERS = [
   '.codeium', '.windsurfrules', '.kiro', 'AGENTS.md', '.github/hooks',
 ];
 
+// Phrases that AI-generated commit messages tend to overuse.
+const AI_PHRASE = /\b(comprehensive|robust|seamless(ly)?|efficient(ly)?|leverage|enhance(d|ment)?|streamline|best practices|production[- ]ready|gracefully|ensure that|implement(ing|ed)? (a |the )?(robust|comprehensive|proper)|improve(d|ment)? (the )?(overall|code))\b/i;
+
+// Bot co-author trailers some AI tools inject automatically (ground truth).
+const BOT_TRAILER = /co-authored-by:.*(\[bot\]|copilot|cursor|claude|noreply@github)/i;
+
+// ─── Shell Helper ─────────────────────────────────────────────────────────────
+
 function sh(cmd, args) {
   try {
     return execFileSync(cmd, args, { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] });
@@ -22,7 +32,13 @@ function sh(cmd, args) {
   }
 }
 
-// Running AI tool processes (own user) matched by command line.
+// ─── Process Tracking ─────────────────────────────────────────────────────────
+
+/**
+ * Snapshot running processes that match known AI tool names.
+ * Uses `ps` and matches against the AI keyword regex.
+ * @returns {{ pid: number, name: string, cmd: string }[]}
+ */
 export function snapshotProcesses() {
   const out = sh('ps', ['-eo', 'pid=,comm=,args=']);
   const procs = [];
@@ -37,7 +53,10 @@ export function snapshotProcesses() {
   return procs;
 }
 
+// ─── Network Tracking ─────────────────────────────────────────────────────────
+
 const rdnsCache = new Map();
+
 async function rdns(ip) {
   if (rdnsCache.has(ip)) return rdnsCache.get(ip);
   let host = null;
@@ -52,7 +71,12 @@ async function rdns(ip) {
   return host;
 }
 
-// Established TCP connections owned by AI processes, with best-effort rDNS.
+/**
+ * Snapshot established TCP connections that belong to AI processes or resolve
+ * to known AI hostnames via reverse DNS.
+ * Uses `ss` with best-effort rDNS (800ms timeout per IP, cached).
+ * @returns {Promise<{ peer: string, host: string|null, proc: string, ai: true }[]>}
+ */
 export async function snapshotNetwork() {
   const out = sh('ss', ['-tnp', 'state', 'established']);
   const conns = [];
@@ -69,7 +93,16 @@ export async function snapshotNetwork() {
   return conns;
 }
 
-// Lightweight git snapshot; deltas are computed at report time.
+// ─── Git Tracking ─────────────────────────────────────────────────────────────
+
+/**
+ * Lightweight git snapshot of the current HEAD state.
+ * Deltas (commit count, dirty files) are computed at report time by comparing
+ * start and end snapshots.
+ * @param {string} dir - Absolute path to the git repository root.
+ * @returns {{ head: string, branch: string, commitCount: number, dirtyCount: number }|null}
+ *   Returns null if the directory is not a git repository.
+ */
 export function snapshotGit(dir) {
   const head = sh('git', ['-C', dir, 'rev-parse', 'HEAD']).trim();
   if (!head) return null;
@@ -79,12 +112,14 @@ export function snapshotGit(dir) {
   return { head, branch, commitCount: count, dirtyCount: dirty };
 }
 
-// Phrases that AI-generated commit messages tend to overuse.
-const AI_PHRASE = /\b(comprehensive|robust|seamless(ly)?|efficient(ly)?|leverage|enhance(d|ment)?|streamline|best practices|production[- ]ready|gracefully|ensure that|implement(ing|ed)? (a |the )?(robust|comprehensive|proper)|improve(d|ment)? (the )?(overall|code))\b/i;
-// Bot co-author trailers some AI tools inject automatically (ground truth).
-const BOT_TRAILER = /co-authored-by:.*(\[bot\]|copilot|cursor|claude|noreply@github)/i;
-
-// Commits between two SHAs with per-commit AI signals.
+/**
+ * Return commits between two SHAs with per-commit AI signals.
+ * Signals: bot-trailer (Co-authored-by bot), tool-mention, ai-phrasing.
+ * @param {string} dir - Absolute path to the git repository root.
+ * @param {string} from - Start SHA (exclusive).
+ * @param {string} to - End SHA (inclusive).
+ * @returns {{ hash: string, subject: string, signals: string[], aiAssisted: boolean }[]}
+ */
 export function gitCommitsBetween(dir, from, to) {
   const range = from && from !== to ? `${from}..${to}` : to;
   const raw = sh('git', ['-C', dir, 'log', range, '--pretty=%H%x1f%s%x1f%b%x1e', '--no-merges']);
@@ -98,12 +133,22 @@ export function gitCommitsBetween(dir, from, to) {
   });
 }
 
-// AI assistant config files present in the project.
+// ─── Environment Scanning ─────────────────────────────────────────────────────
+
+/**
+ * Return the subset of known AI config markers that exist in the project directory.
+ * @param {string} dir - Absolute path to the project root.
+ * @returns {string[]} Relative paths of config files/dirs that are present.
+ */
 export function scanAiConfig(dir) {
   return CONFIG_MARKERS.filter((m) => fs.existsSync(path.join(dir, m)));
 }
 
-// Installed editor extensions whose folder name signals an AI tool.
+/**
+ * Scan common editor extension directories for installed AI tools.
+ * Covers VS Code, VS Code Server, Cursor, and VS Code OSS.
+ * @returns {string[]} Deduplicated list of extension names (version suffix stripped).
+ */
 export function scanEditorExtensions() {
   const home = os.homedir();
   const extDirs = ['.vscode/extensions', '.vscode-server/extensions', '.cursor/extensions', '.vscode-oss/extensions'];
@@ -118,7 +163,11 @@ export function scanEditorExtensions() {
   return [...found];
 }
 
-// AI extensions reported by the VS Code CLI (catches idle tools). Zero overhead.
+/**
+ * List AI extensions reported by the VS Code CLI.
+ * Tries `code`, `code-insiders`, and `cursor` in order; returns on first success.
+ * @returns {string[]} Extension IDs that match the AI keyword regex.
+ */
 export function listCodeExtensions() {
   for (const bin of ['code', 'code-insiders', 'cursor']) {
     const out = sh(bin, ['--list-extensions']);
@@ -127,8 +176,15 @@ export function listCodeExtensions() {
   return [];
 }
 
-// Plaintext AI session logs + language-server logs. Existence/size/mtime are
-// exact invocation evidence; growth across a session ties usage to the window.
+// ─── AI Artifact Tracking ─────────────────────────────────────────────────────
+
+/**
+ * Snapshot known AI session log files and directories.
+ * Size and mtime growth across a session is evidence of active tool use.
+ * @param {string} dir - Absolute path to the project root.
+ * @returns {{ label: string, path: string, exists: true, size: number, mtime: number }[]}
+ *   Only entries that exist on disk are included.
+ */
 export function snapshotAiArtifacts(dir) {
   const home = os.homedir();
   const targets = [

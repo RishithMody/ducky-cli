@@ -2,17 +2,28 @@ import { snapshotProcesses, snapshotNetwork, snapshotGit } from './trackers.js';
 import { watchFiles } from './watcher.js';
 import { renderArt, rgb } from './art.js';
 
+// ─── Constants ────────────────────────────────────────────────────────────────
+
 const BURST_BYTES = 800;
 const POLL_MS = 3000;
 const FEED_MAX = 12;
-const IDLE_GAP_MS = 5 * 60 * 1000; // gap before a burst that suggests an AI consultation pause
+// Gap before a burst that suggests an AI consultation pause.
+const IDLE_GAP_MS = 5 * 60 * 1000;
 
-// Foreground real-time dashboard. Runs until Ctrl-C. Independent of the
-// `start`/`stop` daemon; it observes the same signals live without writing a report.
-export async function runLive(projectDir) {
-  const startedAt = Date.now();
-  const gitStart = snapshotGit(projectDir);
-  const state = {
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+const pad = (s) => (s + ' ').padEnd(16, '.') + ' ';
+const val = (n) => rgb(155, 114, 203, String(n).padStart(3));
+
+function humanDuration(ms) {
+  const s = Math.floor(ms / 1000);
+  return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m ${s % 60}s`;
+}
+
+// ─── State Management ─────────────────────────────────────────────────────────
+
+function createState() {
+  return {
     procs: new Map(),      // name -> last seen ts
     hosts: new Map(),      // host -> hits
     files: new Map(),      // file -> { edits, bytes, bursts }
@@ -22,79 +33,106 @@ export async function runLive(projectDir) {
     idleResumes: 0,        // edits/bursts that followed a long idle gap
     feed: [],              // recent activity lines
   };
+}
 
-  const push = (tag, msg) => {
-    const t = new Date().toLocaleTimeString();
-    state.feed.unshift(`${rgb(120, 120, 120, t)}  ${tag.padEnd(7)}  ${msg}`);
-    if (state.feed.length > FEED_MAX) state.feed.pop();
-  };
+function pushFeed(state, tag, msg) {
+  const t = new Date().toLocaleTimeString();
+  state.feed.unshift(`${rgb(120, 120, 120, t)}  ${tag.padEnd(7)}  ${msg}`);
+  if (state.feed.length > FEED_MAX) state.feed.pop();
+}
 
-  push('start', 'live monitor started');
+// ─── File Change Handler ──────────────────────────────────────────────────────
 
-  const stopWatch = watchFiles(projectDir, (c) => {
-    const now = c.ts || Date.now();
-    const gap = state.lastEditTs ? now - state.lastEditTs : 0;
-    state.lastEditTs = now;
-    state.edits++;
-    const f = state.files.get(c.file) || { edits: 0, bytes: 0, bursts: 0 };
-    f.edits++;
-    if (c.delta > 0) f.bytes += c.delta;
-    const burst = c.delta >= BURST_BYTES;
-    if (burst) { f.bursts++; state.bursts++; }
-    state.files.set(c.file, f);
-    const d = `${c.delta >= 0 ? '+' : ''}${c.delta}b`;
-    push(burst ? 'burst' : 'edit', `${c.file} ${d}${burst ? rgb(217, 101, 112, '  (likely AI paste)') : ''}`);
-    // Long quiet period followed by activity: classic "got stuck, consulted AI, pasted".
-    if (gap >= IDLE_GAP_MS) {
-      state.idleResumes++;
-      push('idle', rgb(217, 101, 112, `resumed after ${Math.round(gap / 60000)}m idle - possible AI consultation pause`));
-    }
-  });
+function handleFileChange(state, c) {
+  const now = c.ts || Date.now();
+  const gap = state.lastEditTs ? now - state.lastEditTs : 0;
+  state.lastEditTs = now;
+  state.edits++;
 
-  async function poll() {
-    const procs = snapshotProcesses();
-    for (const p of procs) {
-      if (!state.procs.has(p.name)) push('proc', `AI process: ${rgb(155, 114, 203, p.name)}`);
-      state.procs.set(p.name, Date.now());
-    }
-    const net = await snapshotNetwork();
-    for (const c of net) {
-      const key = c.host || c.peer;
-      if (!state.hosts.has(key)) push('net', `AI endpoint: ${rgb(66, 133, 244, key)}`);
-      state.hosts.set(key, (state.hosts.get(key) || 0) + 1);
-    }
-    render();
+  const f = state.files.get(c.file) || { edits: 0, bytes: 0, bursts: 0 };
+  f.edits++;
+  if (c.delta > 0) f.bytes += c.delta;
+  const burst = c.delta >= BURST_BYTES;
+  if (burst) { f.bursts++; state.bursts++; }
+  state.files.set(c.file, f);
+
+  const d = `${c.delta >= 0 ? '+' : ''}${c.delta}b`;
+  pushFeed(state, burst ? 'burst' : 'edit', `${c.file} ${d}${burst ? rgb(217, 101, 112, '  (likely AI paste)') : ''}`);
+
+  // Long quiet period followed by activity: classic "got stuck, consulted AI, pasted".
+  if (gap >= IDLE_GAP_MS) {
+    state.idleResumes++;
+    pushFeed(state, 'idle', rgb(217, 101, 112, `resumed after ${Math.round(gap / 60000)}m idle - possible AI consultation pause`));
   }
+}
 
-  function render() {
-    const out = process.stdout;
-    if (out.isTTY) out.write('\x1b[2J\x1b[H'); // clear + home
-    const up = humanDuration(Date.now() - startedAt);
-    const git = snapshotGit(projectDir);
-    const commitDelta = git && gitStart ? git.commitCount - gitStart.commitCount : 0;
+// ─── Render ───────────────────────────────────────────────────────────────────
 
-    const lines = [
-      renderArt(),
-      '',
-      `  ${rgb(155, 114, 203, 'LIVE')}  monitoring ${projectDir}`,
-      `  uptime ${up}   |   poll ${POLL_MS / 1000}s   |   Ctrl-C to exit`,
-      '',
-      `  ${pad('AI processes')}${val(state.procs.size)}   ${[...state.procs.keys()].join(', ') || '-'}`,
-      `  ${pad('AI endpoints')}${val(state.hosts.size)}   ${[...state.hosts.keys()].slice(0, 3).join(', ') || '-'}`,
-      `  ${pad('files touched')}${val(state.files.size)}   (${state.edits} edits)`,
-      `  ${pad('burst edits')}${val(state.bursts)}   ${rgb(217, 101, 112, state.bursts ? 'AI-shaped inserts' : '')}`,
-      `  ${pad('idle resumes')}${val(state.idleResumes)}   ${rgb(217, 101, 112, state.idleResumes ? 'gap+burst (possible AI pause)' : '')}`,
-      `  ${pad('git commits')}${val(commitDelta)}   since start${git ? ` | ${git.branch}@${git.head.slice(0, 7)}` : ''}`,
-      '',
-      `  ${rgb(120, 120, 120, 'Activity')}`,
-      ...state.feed.map((l) => '  ' + l),
-      '',
-    ];
-    out.write(lines.join('\n') + '\n');
+function render(state, projectDir, startedAt, gitStart) {
+  const out = process.stdout;
+  if (out.isTTY) out.write('\x1b[2J\x1b[H'); // clear + home
+
+  const up = humanDuration(Date.now() - startedAt);
+  const git = snapshotGit(projectDir);
+  const commitDelta = git && gitStart ? git.commitCount - gitStart.commitCount : 0;
+
+  const lines = [
+    renderArt(),
+    '',
+    `  ${rgb(155, 114, 203, 'LIVE')}  monitoring ${projectDir}`,
+    `  uptime ${up}   |   poll ${POLL_MS / 1000}s   |   Ctrl-C to exit`,
+    '',
+    `  ${pad('AI processes')}${val(state.procs.size)}   ${[...state.procs.keys()].join(', ') || '-'}`,
+    `  ${pad('AI endpoints')}${val(state.hosts.size)}   ${[...state.hosts.keys()].slice(0, 3).join(', ') || '-'}`,
+    `  ${pad('files touched')}${val(state.files.size)}   (${state.edits} edits)`,
+    `  ${pad('burst edits')}${val(state.bursts)}   ${rgb(217, 101, 112, state.bursts ? 'AI-shaped inserts' : '')}`,
+    `  ${pad('idle resumes')}${val(state.idleResumes)}   ${rgb(217, 101, 112, state.idleResumes ? 'gap+burst (possible AI pause)' : '')}`,
+    `  ${pad('git commits')}${val(commitDelta)}   since start${git ? ` | ${git.branch}@${git.head.slice(0, 7)}` : ''}`,
+    '',
+    `  ${rgb(120, 120, 120, 'Activity')}`,
+    ...state.feed.map((l) => '  ' + l),
+    '',
+  ];
+  out.write(lines.join('\n') + '\n');
+}
+
+// ─── Poll ─────────────────────────────────────────────────────────────────────
+
+async function poll(state, projectDir, startedAt, gitStart) {
+  const procs = snapshotProcesses();
+  for (const p of procs) {
+    if (!state.procs.has(p.name)) pushFeed(state, 'proc', `AI process: ${rgb(155, 114, 203, p.name)}`);
+    state.procs.set(p.name, Date.now());
   }
+  const net = await snapshotNetwork();
+  for (const c of net) {
+    const key = c.host || c.peer;
+    if (!state.hosts.has(key)) pushFeed(state, 'net', `AI endpoint: ${rgb(66, 133, 244, key)}`);
+    state.hosts.set(key, (state.hosts.get(key) || 0) + 1);
+  }
+  render(state, projectDir, startedAt, gitStart);
+}
 
-  await poll();
-  const timer = setInterval(poll, POLL_MS);
+// ─── Entry Point ──────────────────────────────────────────────────────────────
+
+/**
+ * Start the foreground real-time dashboard and block until Ctrl-C or SIGTERM.
+ * Operates independently of the start/stop daemon — it observes the same
+ * signals live without writing a report or touching the event log.
+ * @param {string} projectDir - Absolute path to the project root to monitor.
+ * @returns {Promise<void>} Resolves only after the process exits.
+ */
+export async function runLive(projectDir) {
+  const startedAt = Date.now();
+  const gitStart = snapshotGit(projectDir);
+  const state = createState();
+
+  pushFeed(state, 'start', 'live monitor started');
+
+  const stopWatch = watchFiles(projectDir, (c) => handleFileChange(state, c));
+
+  await poll(state, projectDir, startedAt, gitStart);
+  const timer = setInterval(() => poll(state, projectDir, startedAt, gitStart), POLL_MS);
 
   const shutdown = () => {
     clearInterval(timer);
@@ -105,12 +143,4 @@ export async function runLive(projectDir) {
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
-}
-
-const pad = (s) => (s + ' ').padEnd(16, '.') + ' ';
-const val = (n) => rgb(155, 114, 203, String(n).padStart(3));
-
-function humanDuration(ms) {
-  const s = Math.floor(ms / 1000);
-  return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m ${s % 60}s`;
 }

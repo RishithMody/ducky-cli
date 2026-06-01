@@ -1,14 +1,36 @@
 {
   "name": "ducky",
   "version": "1.0.0",
-  "description": "AI Usage Tracker CLI",
+  "description": "Passive AI usage tracker for software projects",
   "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
   "bin": {
     "ducky": "src/index.js"
   },
   "scripts": {
     "start": "node src/index.js"
   },
+  "keywords": [
+    "ai",
+    "ai-detection",
+    "developer-tools",
+    "cli",
+    "tracking",
+    "copilot",
+    "cursor",
+    "productivity"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-username/ducky.git"
+  },
+  "bugs": {
+    "url": "https://github.com/your-username/ducky/issues"
+  },
+  "homepage": "https://github.com/your-username/ducky#readme",
   "dependencies": {
     "commander": "^13.1.0"
   }

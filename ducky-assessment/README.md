@@ -1,67 +1,133 @@
-# Ducky - AI Usage Tracker CLI
+# ducky
 
-## Overview
+Passive AI usage tracker for software projects.
 
-Modern developers increasingly use AI coding assistants (Copilot, Cursor, Claude Code, ChatGPT, etc.) as part of their workflow. Build a CLI tool called **ducky** that passively monitors a developer's local environment to capture signal about how they use AI tools during a coding session.
+`ducky` runs a background daemon that watches your project for signals of AI coding-tool usage — running processes, network connections, file edit patterns, git commits, and local AI session logs. When you stop a session it writes a structured `ducky-report.json`. A live dashboard shows the same signals in real time.
 
-## Problem Statement
+All data stays local. No telemetry, no network calls, no accounts.
 
-Build a Node.js CLI tool called `ducky` including but not limited to two core commands:
+---
 
-- `ducky start` — begin tracking AI usage in the current project directory
-- `ducky stop` — stop tracking and save a summary report to the project root
+## Installation
 
-The tool must be installable locally via `npm link` (it does not need to be published to npm). When linked, the `ducky` command should be globally available from any terminal.
+```sh
+npm install -g ducky
+```
 
-## Requirements
+Requires Node.js 18 or later. Linux only (uses `ps` and `ss`).
 
-### Functional Requirements
+---
 
-1. **`ducky start`**
-   - Begins monitoring the current working directory for signals of AI tool usage.
-   - Runs a background process or watcher that persists after the terminal command returns.
-   - Prints confirmation that tracking has started and where data is being stored.
-   - Handles the case where tracking is already active (do not start duplicate watchers).
+## Usage
 
-2. **`ducky stop`**
-   - Stops the background tracking process.
-   - Generates a report file (`ducky-report.json`) in the project root summarizing the captured data.
-   - Prints a summary to the terminal before exiting.
-   - Handles the case where no active tracking session exists.
+```
+ducky start    begin tracking the current directory
+ducky stop     stop tracking, write ducky-report.json, print summary
+ducky status   check whether a session is active
+ducky live     real-time dashboard (run in a separate terminal)
+ducky logs     print the daemon log for the current session
+ducky diff     show which files changed most (--ai filters to AI-shaped edits)
+```
 
-3. **Tracking**
-   - The tool should capture as much signal as possible about a developer's AI usage. What you track and how you track it is open-ended, and a core part of this assessment. Consider: What traces do AI tools leave on a developer's machine? Think broadly — processes, files, network activity, editor state, version control patterns, and anything else you can find.
-   - All tracking must be **local only** — no data should be sent to any external service. Note: The litmus CLI running alongside your session tracks your activity for assessment purposes. Your ducky tool should operate independently and not send data externally.
-   - Tracking should be **passive** — it must not interfere with the developer's workflow.
+### Typical workflow
 
-4. **Report Format**
-   - `ducky-report.json` must be valid JSON.
-   - Include a `metadata` section with: session start time, session end time, duration, and project directory.
-   - Include a `tracking` section with the captured signals and any derived metrics.
-   - The structure of the `tracking` section is up to you — design it to be as informative as possible.
+```sh
+cd my-project
+ducky start
 
-### Technical Requirements
+# ... work normally ...
 
-1. The project must use Node.js (TypeScript or JavaScript).
-2. The CLI must be executable via `npm link` — the `ducky` command must work globally after linking.
-3. The tool must handle being started and stopped cleanly (no zombie processes, no orphaned PID files).
-4. Include a `package.json` with a `bin` field pointing to the CLI entry point.
-5. If using TypeScript, include a build step and ensure the compiled output is what `bin` points to.
+ducky stop
+```
 
-### Deliverables
+`ducky-report.json` is written to the project root. The `diff` command reads it:
 
-- A working `ducky` CLI tool with `start` and `stop` (and optionally any other fitting) commands.
-- A `WRITEUP.md` (see below).
+```sh
+ducky diff          # all changed files, sorted by bytes added
+ducky diff --ai     # only files with burst edits or high burstiness
+```
 
-## WRITEUP.md
+---
 
-Include a `WRITEUP.md` in the project root that addresses:
+## How it works
 
-1. **Tracking approach**: What signals did you choose to monitor and why? 
-2. **Signal value**: Why do you think tracking AI usage is useful for evaluating a developer's coding ability or potential? What does it reveal that traditional assessments miss?
-3. **Limitations & extensions**: What additional signals, tools, or third-party services (that you didn't employ in this assessment due to cost or special access) would you use if there were no constraints? Defend them and explain how you would incorporate them. If you don't have any, explain how you would expand on discovering AI usage signal further.
+No single trace proves AI usage. ducky correlates several independent signals:
 
-## Additional Notes
+**Processes** — AI assistants run as identifiable processes (Copilot LSP, Cursor, Claude, aider, ollama, etc.). Sampled every 15 seconds via `ps`.
 
-- You may use any packages, libraries, or tools you find useful.
-- Focus on **depth of signal** over polish — a rough tool that captures meaningful data is more valuable than a polished tool that tracks nothing interesting.
+**Network** — Persistent TCP connections to known AI inference endpoints, identified via reverse DNS. Catches browser-based assistants that the process scan misses.
+
+**File edits** — Humans type incrementally; AI inserts large blocks at once. A single change above 800 bytes is flagged as a burst edit, a proxy for an AI paste or accept. Tracked via `fs.watch` with byte-delta accounting.
+
+**Edit velocity** — Inter-save intervals per file yield a burstiness score: `(sd - mean) / (sd + mean)`. Clustered saves followed by long gaps trend toward 1; steady human cadence trends toward 0.
+
+**Git** — Commits made during the session are scanned for AI signals: tool mentions in the message, overused AI phrasing (comprehensive, robust, seamless, ...), and `Co-authored-by` bot trailers. The bot trailer is ground truth, not heuristic.
+
+**AI session artifacts** — Local plaintext logs that prove invocation: aider (`.aider.chat.history.md`), Claude Code (`~/.claude/projects`), Shell-GPT, and Copilot language-server logs. Growth across the session ties usage to the window.
+
+**Environment** — AI config files (`.cursor`, `CLAUDE.md`, `.kiro`, etc.) and installed editor extensions, surfacing tools that are present but idle.
+
+---
+
+## Output
+
+`ducky-report.json` structure:
+
+```
+metadata        session timing, sample count
+tracking
+  processes     AI tools seen and how often
+  network       AI endpoints contacted
+  files         per-file edit counts, bytes added, burst count, burstiness score
+  git           commits during session with per-commit AI signals
+  aiArtifacts   local AI log files and whether they grew
+  environment   config files and editor extensions found
+summary
+  aiUsageLikely boolean verdict
+  signals       counts for each signal type
+```
+
+---
+
+## Signals reference
+
+| Signal | Source | Notes |
+|---|---|---|
+| AI process detected | `ps` | matched against a keyword regex |
+| AI network endpoint | `ss` + rDNS | reverse DNS on established TCP connections |
+| Burst edit (>800 bytes) | `fs.watch` | proxy for AI paste/accept |
+| Edit burstiness >= 0.6 | inter-save intervals | clustered saves pattern |
+| AI-assisted commit | `git log` | bot trailer, tool mention, or AI phrasing |
+| AI artifact grew | file stat | aider, Claude Code, Shell-GPT, Copilot logs |
+
+`aiUsageLikely` is `true` if any signal fires.
+
+---
+
+## Adding a tool
+
+All tool detection runs through a single regex in `src/trackers.js`:
+
+```js
+const AI = /(copilot|cursor|claude|codeium|...)/i;
+```
+
+Add the tool name to the alternation. It will be picked up by process scanning, network host matching, and extension scanning automatically.
+
+AI config file markers live in the `CONFIG_MARKERS` array in the same file.
+
+---
+
+## Limitations
+
+- Burst detection is a heuristic. A large non-AI paste will trigger it.
+- Reverse DNS misses CDN-fronted providers.
+- The keyword list requires upkeep as new tools emerge.
+- `fs.watch` recursive mode is Linux/macOS only; Windows support is untested.
+- The process and network scanners only see the current user's processes.
+
+---
+
+## License
+
+MIT
