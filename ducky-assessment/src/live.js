@@ -68,13 +68,14 @@ function handleFileChange(state, c) {
 
 // ─── Render ───────────────────────────────────────────────────────────────────
 
-function render(state, projectDir, startedAt, gitStart) {
+function render(state, projectDir, startedAt, gitStart, gitCurrent) {
   const out = process.stdout;
-  if (out.isTTY) out.write('\x1b[2J\x1b[H'); // clear + home
+  // Move to top-left and erase downward — overwrites in place without blanking
+  // the screen first, eliminating the flash caused by a full clear + repaint.
+  if (out.isTTY) out.write('\x1b[H\x1b[J');
 
   const up = humanDuration(Date.now() - startedAt);
-  const git = snapshotGit(projectDir);
-  const commitDelta = git && gitStart ? git.commitCount - gitStart.commitCount : 0;
+  const commitDelta = gitCurrent && gitStart ? gitCurrent.commitCount - gitStart.commitCount : 0;
 
   const lines = [
     renderArt(),
@@ -87,7 +88,7 @@ function render(state, projectDir, startedAt, gitStart) {
     `  ${pad('files touched')}${val(state.files.size)}   (${state.edits} edits)`,
     `  ${pad('burst edits')}${val(state.bursts)}   ${rgb(217, 101, 112, state.bursts ? 'AI-shaped inserts' : '')}`,
     `  ${pad('idle resumes')}${val(state.idleResumes)}   ${rgb(217, 101, 112, state.idleResumes ? 'gap+burst (possible AI pause)' : '')}`,
-    `  ${pad('git commits')}${val(commitDelta)}   since start${git ? ` | ${git.branch}@${git.head.slice(0, 7)}` : ''}`,
+    `  ${pad('git commits')}${val(commitDelta)}   since start${gitCurrent ? ` | ${gitCurrent.branch}@${gitCurrent.head.slice(0, 7)}` : ''}`,
     '',
     `  ${rgb(120, 120, 120, 'Activity')}`,
     ...state.feed.map((l) => '  ' + l),
@@ -110,7 +111,9 @@ async function poll(state, projectDir, startedAt, gitStart) {
     if (!state.hosts.has(key)) pushFeed(state, 'net', `AI endpoint: ${rgb(66, 133, 244, key)}`);
     state.hosts.set(key, (state.hosts.get(key) || 0) + 1);
   }
-  render(state, projectDir, startedAt, gitStart);
+  // Snapshot git once per poll cycle rather than on every render call.
+  const gitCurrent = snapshotGit(projectDir);
+  render(state, projectDir, startedAt, gitStart, gitCurrent);
 }
 
 // ─── Entry Point ──────────────────────────────────────────────────────────────
